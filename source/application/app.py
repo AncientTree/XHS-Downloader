@@ -266,8 +266,14 @@ class XHS:
             data, self.manager.image_format
         )
 
-    def __extract_video(self, container: dict, data: Namespace):
-        container["下载地址"] = self.video.get_video_link(data)
+    def __extract_video(
+        self,
+        container: dict,
+        data: Namespace,
+    ):
+        container["下载地址"] = self.video.get_video_link(
+            data,
+        )
         container["动图地址"] = [
             None,
         ]
