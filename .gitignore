@@ -6,3 +6,7 @@ __pycache__/
 /.run/
 /Volume/
 !/.github/
+*.json
+*.jsonl
+/Download/
+cookies.txt

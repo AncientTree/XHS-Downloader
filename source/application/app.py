@@ -60,6 +60,62 @@ from .image import Image
 from .request import Html
 from .video import Video
 from rich import print
+import asyncio
+import json
+import hashlib
+from pathlib import Path
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse
+
+# --- 定义同步相关的文件路径 ---
+SYNC_DATA_FILE = Path("sync_data.jsonl")
+SYNC_STATUS_FILE = Path("sync_status.json")
+
+def calculate_hash(file_path: Path) -> str:
+    """计算文件的 SHA256 哈希值"""
+    if not file_path.exists():
+        return "no_data"
+    
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+def read_sync_status() -> dict:
+    """读取同步状态文件"""
+    if not SYNC_STATUS_FILE.exists():
+        return {"hash": "no_data", "unsynced_count": 0}
+    try:
+        with open(SYNC_STATUS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {"hash": "no_data", "unsynced_count": 0}
+
+
+def write_sync_status(status: dict):
+    """写入同步状态文件"""
+    with open(SYNC_STATUS_FILE, "w", encoding="utf-8") as f:
+        json.dump(status, f, ensure_ascii=False, indent=4)
+
+async def append_to_sync_file(data: dict):
+    """将新的笔记 JSON 追加到同步文件中 (异步)"""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _append_sync, data)
+    
+def _append_sync(data: dict):
+    """同步的追加写入函数"""
+    with open(SYNC_DATA_FILE, "a", encoding="utf-8") as f:
+        data_to_write = data.copy()
+        data_to_write['synced'] = False
+        f.write(json.dumps(data_to_write, ensure_ascii=False) + "\n")
+        
+    new_hash = calculate_hash(SYNC_DATA_FILE)
+    status = read_sync_status()
+    status['hash'] = new_hash
+    status['unsynced_count'] = status.get('unsynced_count', 0) + 1
+    write_sync_status(status)
+
 
 __all__ = ["XHS"]
 
@@ -736,9 +792,76 @@ class XHS:
                     extract.proxy,
                 ):
                     msg = _("获取小红书作品数据成功")
+                    # 检查是否是有效的笔记数据，然后记录以待同步
+                    if isinstance(data, dict) and data.get("作品ID"):
+                        await append_to_sync_file(data)
+                        self.logging(f"笔记 {data['作品ID']} 已被记录以待同步。")
                 else:
                     msg = _("获取小红书作品数据失败")
             return ExtractData(message=msg, params=extract, data=data)
+        @server.get("/sync/status", summary="获取当前数据状态哈希", tags=["Sync"])
+        async def get_sync_status():
+            """
+            PC 客户端调用此接口获取当前服务器数据的状态。
+            返回:
+                - hash: 当前 sync_data.jsonl 文件的 SHA256 哈希。
+                - unsynced_count: 当前未被同步的笔记数量。
+            """
+            status = read_sync_status()
+            return JSONResponse(content=status)
+
+        @server.get("/sync/data", summary="获取所有未同步的笔记数据", tags=["Sync"])
+        async def get_unsynced_data():
+            """
+            如果 PC 客户端发现哈希不匹配，调用此接口获取所有标记为
+            'synced': false 的笔记数据。
+            """
+            if not SYNC_DATA_FILE.exists():
+                return JSONResponse(content=[])
+            
+            unsynced_items = []
+            with open(SYNC_DATA_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        item = json.loads(line)
+                        if not item.get('synced', True):
+                            unsynced_items.append(item)
+                    except json.JSONDecodeError:
+                        continue
+            return JSONResponse(content=unsynced_items)
+
+        @server.post("/sync/commit", summary="标记所有笔记为已同步", tags=["Sync"])
+        async def commit_sync():
+            """
+            PC 客户端成功下载并处理完所有数据后，调用此接口。
+            服务器会将所有笔记的 'synced' 标记更新为 true，并重置计数器。
+            """
+            if not SYNC_DATA_FILE.exists():
+                return JSONResponse(content={"message": "没有数据文件可提交。"}, status_code=404)
+            
+            temp_file = SYNC_DATA_FILE.with_suffix(".tmp")
+            
+            # 读取旧文件，更新内容并写入临时文件
+            with open(SYNC_DATA_FILE, "r", encoding="utf-8") as f_read, \
+                 open(temp_file, "w", encoding="utf-8") as f_write:
+                for line in f_read:
+                    try:
+                        item = json.loads(line)
+                        item['synced'] = True
+                        f_write.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    except json.JSONDecodeError:
+                        continue
+            
+            # 用临时文件覆盖原文件（原子操作）
+            temp_file.replace(SYNC_DATA_FILE)
+            
+            # 更新状态文件
+            new_hash = calculate_hash(SYNC_DATA_FILE)
+            status = {"hash": new_hash, "unsynced_count": 0}
+            write_sync_status(status)
+            
+            self.logging("所有笔记已标记为同步，状态已提交。")
+            return JSONResponse(content={"message": "同步已提交。", "new_status": status})
 
     async def run_mcp_server(
         self,
