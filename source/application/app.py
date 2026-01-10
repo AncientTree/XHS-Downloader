@@ -71,6 +71,23 @@ from fastapi.responses import JSONResponse
 SYNC_DATA_FILE = Path("sync_data.jsonl")
 SYNC_STATUS_FILE = Path("sync_status.json")
 
+# 创建一个新函数，用于实时计算未同步的数量
+def count_unsynced_items(file_path: Path) -> int:
+    """实时计算文件中 'synced': false 的条目数量"""
+    if not file_path.exists():
+        return 0
+    
+    count = 0
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                item = json.loads(line)
+                if not item.get('synced', True):
+                    count += 1
+            except json.JSONDecodeError:
+                continue
+    return count
+
 def calculate_hash(file_path: Path) -> str:
     """计算文件的 SHA256 哈希值"""
     if not file_path.exists():
@@ -111,9 +128,8 @@ def _append_sync(data: dict):
         f.write(json.dumps(data_to_write, ensure_ascii=False) + "\n")
         
     new_hash = calculate_hash(SYNC_DATA_FILE)
-    status = read_sync_status()
-    status['hash'] = new_hash
-    status['unsynced_count'] = status.get('unsynced_count', 0) + 1
+    new_count = count_unsynced_items(SYNC_DATA_FILE)
+    status = {"hash": new_hash, "unsynced_count": new_count}
     write_sync_status(status)
 
 
