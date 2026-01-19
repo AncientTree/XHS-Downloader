@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import asyncio
 from source import XHS # 从项目的 source 包中导入 XHS 类
 import os
@@ -9,9 +10,8 @@ cookies_file_path = 'cookies.txt'
 XHS_COOKIE = "" 
 if os.path.exists(cookies_file_path):
     with open(cookies_file_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+        XHS_COOKIE = f.readline().strip() 
         # 将所有行合并成一个字符串
-        XHS_COOKIE = "".join(lines)
     print(f"成功读取的cookies字符串长度：{len(XHS_COOKIE)}")
 else:
     print(f"错误：找不到文件 '{cookies_file_path}'。")

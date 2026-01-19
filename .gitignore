@@ -10,3 +10,4 @@ __pycache__/
 *.jsonl
 /Download/
 cookies.txt
+*.service
