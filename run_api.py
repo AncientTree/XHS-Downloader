@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import asyncio
 from source import XHS # 从项目的 source 包中导入 XHS 类
 import os
