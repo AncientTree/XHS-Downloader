@@ -11,3 +11,4 @@ __pycache__/
 /Download/
 cookies.txt
 *.service
+*.db

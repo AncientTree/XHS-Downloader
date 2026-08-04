@@ -67,71 +67,102 @@ from pathlib import Path
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
-# --- 定义同步相关的文件路径 ---
-SYNC_DATA_FILE = Path("sync_data.jsonl")
-SYNC_STATUS_FILE = Path("sync_status.json")
+# ==============================================================================
+# ======================== 同步功能模块 (SQLite版) ========================
+# ==============================================================================
+import json
+import sqlite3
+import hashlib
+from pathlib import Path
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse
+import asyncio
+from pydantic import Field, BaseModel
 
-# 创建一个新函数，用于实时计算未同步的数量
-def count_unsynced_items(file_path: Path) -> int:
-    """实时计算文件中 'synced': false 的条目数量"""
-    if not file_path.exists():
-        return 0
+class CommitOneParams(BaseModel):
+    note_id: str
+
+# 定义数据库文件路径
+DB_FILE = Path("sync_data.db")
+
+def init_db():
+    """初始化数据库表结构"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # 创建表：note_id 作为主键，json_content 存储原始JSON，synced 标记状态
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS notes (
+            note_id TEXT PRIMARY KEY,
+            json_content TEXT,
+            synced INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# 在模块加载时尝试初始化
+init_db()
+
+def calculate_db_hash() -> str:
+    """
+    计算当前未同步数据的哈希指纹。
+    原理：获取所有未同步笔记的ID，排序后拼接，计算哈希。
+    这样只要列表有变化，哈希就会变。
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT note_id FROM notes WHERE synced = 0 ORDER BY note_id")
+    rows = cursor.fetchall()
+    conn.close()
     
-    count = 0
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                item = json.loads(line)
-                if not item.get('synced', True):
-                    count += 1
-            except json.JSONDecodeError:
-                continue
+    if not rows:
+        return "all_synced"
+    
+    content = "".join([row[0] for row in rows])
+    return hashlib.md5(content.encode()).hexdigest()
+
+def get_unsynced_count() -> int:
+    """获取未同步数量"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM notes WHERE synced = 0")
+    count = cursor.fetchone()[0]
+    conn.close()
     return count
 
-def calculate_hash(file_path: Path) -> str:
-    """计算文件的 SHA256 哈希值"""
-    if not file_path.exists():
-        return "no_data"
-    
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
-
-def read_sync_status() -> dict:
-    """读取同步状态文件"""
-    if not SYNC_STATUS_FILE.exists():
-        return {"hash": "no_data", "unsynced_count": 0}
-    try:
-        with open(SYNC_STATUS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {"hash": "no_data", "unsynced_count": 0}
-
-
-def write_sync_status(status: dict):
-    """写入同步状态文件"""
-    with open(SYNC_STATUS_FILE, "w", encoding="utf-8") as f:
-        json.dump(status, f, ensure_ascii=False, indent=4)
-
 async def append_to_sync_file(data: dict):
-    """将新的笔记 JSON 追加到同步文件中 (异步)"""
+    """
+    插入新笔记到数据库 (异步包装)
+    如果笔记已存在，则忽略（避免重复添加）
+    """
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _append_sync, data)
-    
-def _append_sync(data: dict):
-    """同步的追加写入函数"""
-    with open(SYNC_DATA_FILE, "a", encoding="utf-8") as f:
-        data_to_write = data.copy()
-        data_to_write['synced'] = False
-        f.write(json.dumps(data_to_write, ensure_ascii=False) + "\n")
-        
-    new_hash = calculate_hash(SYNC_DATA_FILE)
-    new_count = count_unsynced_items(SYNC_DATA_FILE)
-    status = {"hash": new_hash, "unsynced_count": new_count}
-    write_sync_status(status)
+    await loop.run_in_executor(None, _insert_note_to_db, data)
 
+def _insert_note_to_db(data: dict):
+    """实际的数据库插入操作"""
+    note_id = data.get("作品ID")
+    if not note_id:
+        return
+
+    # 确保写入的数据里 synced 字段是统一的（虽然DB有字段，但JSON里也保留一份）
+    data['synced'] = False
+    json_str = json.dumps(data, ensure_ascii=False)
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        # INSERT OR IGNORE: 如果ID已存在，则不操作
+        cursor.execute(
+            "INSERT OR IGNORE INTO notes (note_id, json_content, synced) VALUES (?, ?, 0)",
+            (note_id, json_str)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"数据库插入错误: {e}")
+
+# ==============================================================================
 
 __all__ = ["XHS"]
 
@@ -821,69 +852,69 @@ class XHS:
                 else:
                     msg = _("获取小红书作品数据失败")
             return ExtractData(message=msg, params=extract, data=data)
-        @server.get("/sync/status", summary="获取当前数据状态哈希", tags=["Sync"])
+        
+        @server.get("/sync/status", summary="获取当前数据状态", tags=["Sync"])
         async def get_sync_status():
-            """
-            PC 客户端调用此接口获取当前服务器数据的状态。
-            返回:
-                - hash: 当前 sync_data.jsonl 文件的 SHA256 哈希。
-                - unsynced_count: 当前未被同步的笔记数量。
-            """
-            status = read_sync_status()
-            return JSONResponse(content=status)
+            """返回当前的哈希指纹和未同步数量"""
+            current_hash = calculate_db_hash()
+            current_count = get_unsynced_count()
+            return JSONResponse(content={"hash": current_hash, "unsynced_count": current_count})
+
 
         @server.get("/sync/data", summary="获取所有未同步的笔记数据", tags=["Sync"])
         async def get_unsynced_data():
-            """
-            如果 PC 客户端发现哈希不匹配，调用此接口获取所有标记为
-            'synced': false 的笔记数据。
-            """
-            if not SYNC_DATA_FILE.exists():
-                return JSONResponse(content=[])
+            """从数据库读取所有 synced=0 的记录"""
+            conn = sqlite3.connect(DB_FILE)
+            conn.row_factory = sqlite3.Row # 允许按列名访问
+            cursor = conn.cursor()
+            cursor.execute("SELECT json_content FROM notes WHERE synced = 0")
+            rows = cursor.fetchall()
+            conn.close()
             
-            unsynced_items = []
-            with open(SYNC_DATA_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        item = json.loads(line)
-                        if not item.get('synced', True):
-                            unsynced_items.append(item)
-                    except json.JSONDecodeError:
-                        continue
-            return JSONResponse(content=unsynced_items)
+            # 解析 JSON 字符串返回列表
+            data_list = []
+            for row in rows:
+                try:
+                    note = json.loads(row['json_content'])
+                    data_list.append(note)
+                except:
+                    continue
+                    
+            return JSONResponse(content=data_list)
 
-        @server.post("/sync/commit", summary="标记所有笔记为已同步", tags=["Sync"])
-        async def commit_sync():
+        
+        @server.post("/sync/commit_one", summary="标记单条笔记为已同步", tags=["Sync"])
+        async def commit_one_sync(params: CommitOneParams):
             """
-            PC 客户端成功下载并处理完所有数据后，调用此接口。
-            服务器会将所有笔记的 'synced' 标记更新为 true，并重置计数器。
+            高性能更新：直接修改数据库中的一行状态
             """
-            if not SYNC_DATA_FILE.exists():
-                return JSONResponse(content={"message": "没有数据文件可提交。"}, status_code=404)
+            note_id = params.note_id
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
             
-            temp_file = SYNC_DATA_FILE.with_suffix(".tmp")
+            # 1. 更新 synced 字段
+            cursor.execute("UPDATE notes SET synced = 1 WHERE note_id = ?", (note_id,))
             
-            # 读取旧文件，更新内容并写入临时文件
-            with open(SYNC_DATA_FILE, "r", encoding="utf-8") as f_read, \
-                 open(temp_file, "w", encoding="utf-8") as f_write:
-                for line in f_read:
-                    try:
-                        item = json.loads(line)
-                        item['synced'] = True
-                        f_write.write(json.dumps(item, ensure_ascii=False) + "\n")
-                    except json.JSONDecodeError:
-                        continue
+            # 2. 同时更新 json_content 里的 synced 字段（保持数据一致性）
+            #    这一步稍微复杂，需要读取->修改->写回，但在 SQLite 中依然很快
+            #    或者为了性能，我们只更新 status 字段，取数据时覆盖 json 里的字段
+            #    这里为了简便，我们只更新状态字段。客户端下次获取时不会再获取到它。
             
-            # 用临时文件覆盖原文件（原子操作）
-            temp_file.replace(SYNC_DATA_FILE)
+            conn.commit()
+            changes = conn.total_changes
+            conn.close()
             
-            # 更新状态文件
-            new_hash = calculate_hash(SYNC_DATA_FILE)
-            status = {"hash": new_hash, "unsynced_count": 0}
-            write_sync_status(status)
+            if changes > 0:
+                self.logging(f"笔记 {note_id} 已标记为同步 (SQLite).")
             
-            self.logging("所有笔记已标记为同步，状态已提交。")
-            return JSONResponse(content={"message": "同步已提交。", "new_status": status})
+            # 重新计算状态返回
+            current_hash = calculate_db_hash()
+            current_count = get_unsynced_count()
+            
+            return JSONResponse(content={
+                "message": "success", 
+                "new_status": {"hash": current_hash, "unsynced_count": current_count}
+            })
 
     async def run_mcp_server(
         self,
