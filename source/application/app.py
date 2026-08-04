@@ -174,7 +174,7 @@ class XHS:
     LINK = compile(r"(?:https?://)?www\.xiaohongshu\.com/explore/\S+")
     USER = compile(r"(?:https?://)?www\.xiaohongshu\.com/user/profile/[a-z0-9]+/\S+")
     SHARE = compile(r"(?:https?://)?www\.xiaohongshu\.com/discovery/item/\S+")
-    SHORT = compile(r"(?:https?://)?xhslink\.com/[^\s\"<>\\^`{|}，。；！？、【】《》]+")
+    SHORT = compile(r"(?:https?://)?xhslink\.(?:com\.cn|com|cn)/[^\s\"<>\\^`{|}，。；！？、【】《》]+")
     ID = compile(r"(?:explore|item)/(\S+)?\?")
     ID_USER = compile(r"user/profile/[a-z0-9]+/(\S+)?\?")
     __INSTANCE = None
