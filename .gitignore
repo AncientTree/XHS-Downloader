@@ -9,3 +9,9 @@ __pycache__/
 /build/
 /dist/
 /output/
+*.json
+*.jsonl
+/Download/
+cookies.txt
+*.service
+*.db
