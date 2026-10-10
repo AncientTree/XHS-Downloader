@@ -60,6 +60,7 @@ from .download import Download
 from .explore import Explore
 from .image import Image
 from .request import Html
+from .sync import append_to_sync_file, register_sync_routes
 from .video import Video
 
 __all__ = ["XHS"]
@@ -849,9 +850,14 @@ class XHS:
                     proxy=extract.proxy,
                 ):
                     msg = _("获取小红书作品数据成功")
+                    if isinstance(data, dict) and data.get("作品ID"):
+                        await append_to_sync_file(data)
+                        self.logging(f"笔记 {data['作品ID']} 已被记录以待同步。")
                 else:
                     msg = _("获取小红书作品数据失败")
             return ExtractData(message=msg, params=extract, data=data)
+
+        register_sync_routes(server, self.logging)
 
     async def run_mcp_server(
         self,
